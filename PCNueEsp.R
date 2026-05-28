@@ -123,17 +123,76 @@ write.csv(NNT, "NNT_IFN4.csv", row.names = FALSE)
 ###########################CREACIÓN DE UN CAMPO ID###############################
 #################################################################################
 
-Limpio <- read.csv(
-  "C:/Users/DAVID COLLADO/Desktop/Doctorado/IFN 4/NNT_IFN4.csv",
-  stringsAsFactors = FALSE
+# Diccionario de provincias
+provincias <- c(
+  "01" = "Álava",
+  "02" = "Albacete",
+  "03" = "Alicante",
+  "04" = "Almería",
+  "05" = "Ávila",
+  "06" = "Badajoz",
+  "07" = "Baleares",
+  "08" = "Barcelona",
+  "09" = "Burgos",
+  "10" = "Cáceres",
+  "11" = "Cádiz",
+  "12" = "Castellón",
+  "13" = "Ciudad Real",
+  "14" = "Córdoba",
+  "15" = "A Coruña",
+  "16" = "Cuenca",
+  "17" = "Girona",
+  "18" = "Granada",
+  "19" = "Guadalajara",
+  "20" = "Guipúzcoa",
+  "21" = "Huelva",
+  "22" = "Huesca",
+  "23" = "Jaén",
+  "24" = "León",
+  "25" = "Lleida",
+  "26" = "La Rioja",
+  "27" = "Lugo",
+  "28" = "Madrid",
+  "29" = "Málaga",
+  "30" = "Murcia",
+  "31" = "Navarra",
+  "32" = "Ourense",
+  "33" = "Asturias",
+  "34" = "Palencia",
+  "35" = "Las Palmas",
+  "36" = "Pontevedra",
+  "37" = "Salamanca",
+  "38" = "Santa Cruz de Tenerife",
+  "39" = "Cantabria",
+  "40" = "Segovia",
+  "41" = "Sevilla",
+  "42" = "Soria",
+  "43" = "Tarragona",
+  "44" = "Teruel",
+  "45" = "Toledo",
+  "46" = "Valencia",
+  "47" = "Valladolid",
+  "48" = "Vizcaya",
+  "49" = "Zamora",
+  "50" = "Zaragoza",
+  "51" = "Ceuta",
+  "52" = "Melilla"
 )
+
+NNT_IFN4 <- read.csv("C:/Users/DAVID COLLADO/Desktop/Doctorado/IFN 4/NNT_IFN4.csv")
+
+# Crear nuevo campo con el nombre de la provincia
+NNT_IFN4$PROVINCIA <- provincias[as.character(NNT_IFN4$COD_PROVINCIA)]
+
+Limpio <- NNT_IFN4
+
 
 # Crear el campo COD_ID
 Limpio$COD_ID <- paste0(
-  Limpio$COD_INVENTARIO,
-  Limpio$COD_PROVINCIA,
-  Limpio$ESTADILLO,
-  Limpio$CLASE
+  sprintf("%02d", Limpio$COD_PROVINCIA),  # siempre 2 dígitos
+  sprintf("%04d", Limpio$ESTADILLO),      # opcional: rellena también estadillo
+  Limpio$CLASE,
+  Limpio$SUBCLASE
 )
 
 # Ver los primeros resultados
@@ -145,3 +204,28 @@ write.csv(
   "NNT_COD_ID.csv",
   row.names = FALSE
 )
+
+#Unión NNT - COORDENADAS:
+
+library(readxl)
+
+# Leer los CSV
+data1 <- read.csv("C:/Users/DAVID COLLADO/Desktop/Doctorado/IFN 4/NNT_COD_ID.csv")
+data2 <- read_xlsx("C:/Users/DAVID COLLADO/Desktop/Doctorado/IFN 4/COORD IFN4 MEJORADAS_ED50-ETRS89.xlsx")
+
+# Unir mediante el campo PARCELA
+datos_unidos <- merge(
+  data1,
+  data2,
+  by = "PARCELA",
+  all = TRUE
+)
+
+
+# Exportar resultado
+write.csv(
+  datos_unidos,
+  "NNT_COORD.csv",
+  row.names = FALSE
+)
+
