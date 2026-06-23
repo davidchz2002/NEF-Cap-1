@@ -386,65 +386,68 @@ sjPlot::plot_model(mod_hurdle_tmb, type = "est", transform = NULL, grid = TRUE)
 # 3. GENERACIÓN DE GRÁFICAS DE EFECTOS
 # ==========================================
 
-# IMPORTANTE: Importar de nuevo los datos (sin estandarizar)
-data_original <- read_excel("C:/Users/DAVID COLLADO/Desktop/Doctorado/RiquezaCleanReduc.xlsx")
-df_real <- data_original 
+data_orig <- read_excel("C:/Users/DAVID COLLADO/Desktop/Doctorado/RiquezaCleanReduc.xlsx")
 
-# Lista de variables continuas del modelo
-variables <- c("TmesFrio", "PmesSeco", "pH", "HIImed", "DistCosta", "LongRios")
+vars <- c("TmesFrio","PmesSeco","pH","HIImed","DistCosta","LongRios")
 
-graficos_conteo <- list()
-graficos_presencia <- list()
-
-for (var in variables) {
+pred_var <- function(var){
   
-  # Mantenemos '[all]' para que ggeffects genere los puntos necesarios para curvas suaves
-  termino_grafico <- paste0(var, " [all]")
+  x <- seq(min(data[[var]]), max(data[[var]]), length.out = 200)
   
-  # -------------------------------------------------------------
-  # COMPONENTE 1: Cantidad de Riqueza (Parte Conteo Truncado)
-  # -------------------------------------------------------------
-  pred_count <- ggpredict(mod_hurdle_tmb, terms = termino_grafico, type = "count")
+  nd <- data[rep(1,200),]
+  nd[vars] <- lapply(data[vars], mean, na.rm = TRUE)
+  nd[[var]] <- x
   
-  graficos_conteo[[var]] <- plot(pred_count) +
-    labs(
-      title = paste("Efecto en Riqueza:", var), 
-      x = var, 
-      y = "Riqueza esperada (>0)"
-    ) +
-    theme_minimal()
+  x_real <- x * sd(data_orig[[var]], na.rm = TRUE) +
+    mean(data_orig[[var]], na.rm = TRUE)
   
-  # -------------------------------------------------------------
-  # COMPONENTE 2: Probabilidad de Presencia (Parte Zero-Inflation)
-  # -------------------------------------------------------------
-  pred_zi <- ggpredict(mod_hurdle_tmb, terms = termino_grafico, type = "zi_prob")
-  
-  # Inversión matemática para ecología (Presencia: 1 - Ausencia)
-  pred_zi$predicted <- 1 - pred_zi$predicted
-  
-  # Inversión correcta de los límites del intervalo de confianza
-  temp_low <- pred_zi$conf.low
-  pred_zi$conf.low <- 1 - pred_zi$conf.high
-  pred_zi$conf.high <- 1 - temp_low
-  
-  graficos_presencia[[var]] <- plot(pred_zi) +
-    labs(
-      title = paste("Prob. Superar Barrera:", var), 
-      x = var, 
-      y = "Probabilidad (Riqueza > 0)"
-    ) +
-    theme_minimal()
+  list(
+    
+    hurdle = data.frame(
+      Variable = var,
+      x = x_real,
+      y = 1 - predict(mod_hurdle_tmb, nd, type = "zprob")
+    ),
+    
+    count = data.frame(
+      Variable = var,
+      x = x_real,
+      y = predict(mod_hurdle_tmb, nd, type = "conditional")
+    )
+    
+  )
 }
 
-# ==========================================
-# 4. VISUALIZACIÓN DE LOS PANELES FINALES
-# ==========================================
-panel_conteo <- patchwork::wrap_plots(graficos_conteo, ncol = 3) + 
-  plot_annotation(title = "Componente de Conteo: Factores que regulan la cantidad de Riqueza")
+res <- lapply(vars, pred_var)
 
-panel_presencia <- patchwork::wrap_plots(graficos_presencia, ncol = 3) + 
-  plot_annotation(title = "Componente Zero-Inflation: Factores que permiten superar la barrera del cero")
+hurdle_df <- bind_rows(lapply(res, `[[`, "hurdle"))
+count_df  <- bind_rows(lapply(res, `[[`, "count"))
 
-# Ejecuta estas líneas para pintar los paneles en RStudio
-print(panel_conteo)
+# ----------------------------------------------------------
+# Figura 1: Superación de barrera (Riqueza > 0)
+# ----------------------------------------------------------
+
+fig_hurdle <- ggplot(hurdle_df, aes(x, y)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~Variable, scales = "free_x") +
+  labs(y = "P(Riqueza > 0)", x = NULL) +
+  theme_bw()
+
+# ----------------------------------------------------------
+# Figura 2: Conteo condicionado a presencia
+# ----------------------------------------------------------
+
+fig_count <- ggplot(count_df, aes(x, y)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~Variable, scales = "free_x") +
+  labs(y = "Riqueza esperada", x = NULL) +
+  theme_bw()
+
+# ----------------------------------------------------------
+# 3: Visualización
+# ----------------------------------------------------------
+
+print(fig_hurdle) #Establecimiento
+print(fig_count) #Riqueza
+
 print(panel_presencia)
