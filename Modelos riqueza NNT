@@ -1,0 +1,450 @@
+library(aods3)
+library(ape)
+library(car)
+library(corrplot)
+library(dplyr)
+library(ggeffects)
+library(ggplot2)
+library(glmmTMB)
+library(gstat)
+library(MASS)
+library(mgcv)
+library(patchwork)
+library(performance)
+library(pscl)
+library(ranger)
+library(readxl)
+library(see)
+library(sjPlot)
+library(spdep)
+library(tidyverse)
+library(vip)
+
+############################################################
+# 1. IMPORTAR DATOS
+############################################################
+
+data <- read_excel("C:/Users/DAVID COLLADO/Desktop/Doctorado/RiquezaCleanReduc.xlsx")
+colnames(data)
+
+############################################################
+# 2. ANÁLISIS EXPLORATORIO DE DATOS (AED)
+############################################################
+
+# 2. Inspección estructural y dimensional
+# Cambia 'data' a tibble para mejorar la visualización en consola
+data <- as_tibble(data)
+
+cat("--- Dimensiones del conjunto de datos ---\n")
+dim(data) # Muestra filas y columnas
+
+cat("\n--- Estructura y tipos de variables ---\n")
+glimpse(data)
+
+# 3. Estadísticos descriptivos básicos
+cat("\n--- Resumen estadístico (Mín, Max, Media, Cuartiles) ---\n")
+summary(data |> dplyr::select(Riqueza, TmesFrio, PmesSeco, pH, HIImed, DistCosta, LongRios))
+
+# 4. Distribución de la Variable Respuesta (Riqueza)
+# Al ser datos de conteo, es vital ver la frecuencia de ceros y valores altos
+ggplot(data, aes(x = Riqueza)) +
+  geom_histogram(binwidth = 1, fill = "darkgreen", color = "white", alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "Distribución de la Riqueza de Árboles Exóticos",
+    x = "Número de Especies por Cuadrícula (5x5 km)",
+    y = "Frecuencia (Nº de Cuadrículas)"
+  )
+
+# 5. Análisis de Correlación Lineal (Multicolinealidad)
+# Seleccionamos solo las variables explicativas numéricas
+variables_explicativas <- data |> 
+  dplyr::select(TmesFrio, PmesSeco, pH, HIImed, DistCosta, LongRios)
+
+# Calcular matriz (ignora filas con valores faltantes si los hubiera)
+matriz_correlacion <- cor(variables_explicativas, use = "complete.obs")
+
+# Dibujar gráfico de correlación coloreado
+corrplot(matriz_correlacion, 
+         method = "color", 
+         type = "upper", 
+         addCoef.col = "black", 
+         tl.col = "black", 
+         number.cex = 0.8,
+         diag = FALSE,
+         title = "\nMatriz de Correlación entre Variables Explicativas")
+
+# 6. Gráficos de Dispersión: Relación de cada variable con la Riqueza
+# Convertimos los datos a formato largo para graficar todo de una sola vez
+data |> 
+  dplyr::select(Riqueza, TmesFrio, PmesSeco, pH, HIImed, DistCosta, LongRios) |> 
+  pivot_longer(cols = -Riqueza, names_to = "Variable", values_to = "Valor") |> 
+  ggplot(aes(x = Valor, y = Riqueza)) +
+  geom_point(alpha = 0.1, color = "steelblue") + # Alpha bajo para evitar saturación
+  geom_smooth(method = "gam", color = "firebrick", se = TRUE) + # Tendencia flexible
+  facet_wrap(~ Variable, scales = "free_x") +
+  theme_minimal() +
+  labs(
+    title = "Relación de las Variables Explicativas con la Riqueza de Exóticas",
+    subtitle = "Línea roja representa la tendencia estimada (GAM)",
+    x = "Valor de la Variable",
+    y = "Riqueza (Nº de especies)"
+  )
+
+# 7. Modelo de prueba para analizar la multicolinealidad de las variables explicativas
+mod_vif <- lm(
+  Riqueza ~ TmesFrio + PmesSeco + DistCosta + LongRios + pH + HIImed,
+  data = data
+)
+
+#Calcular y mostrar los valores VIF individuales
+cat("--- FACTOR DE INFLACIÓN DE LA VARIANZA (VIF) ---\n")
+car::vif(mod_vif)
+
+############################################################
+# 3. ESTANDARIZAR LAS VARIABLES
+############################################################
+
+vars <- c(
+  "TmesFrio",
+  "PmesSeco",
+  "DistCosta",
+  "LongRios",
+  "pH",
+  "HIImed"
+)
+
+data[vars] <- scale(data[vars])
+
+############################################################
+# 4. GLM BINOMIAL NEGATIVA
+############################################################
+
+# 1. Ajustar el modelo Binomial Negativa
+mod_nb <- glm.nb(Riqueza ~ TmesFrio + I(TmesFrio^2) + PmesSeco + pH + HIImed + DistCosta + I(DistCosta^2) + LongRios, data = data)
+
+# 2. Seleccionar una submuestra aleatoria (para evitar falta de memoria RAM con 20k filas)
+set.seed(123)
+sub <- data[sample(1:nrow(data), 2000), ]
+
+# 3. Extraer residuos y calcular la matriz de pesos espaciales
+residuos_sub <- residuals(mod_nb, type = "pearson")[as.numeric(rownames(sub))]
+matriz_pesos <- 1 / as.matrix(dist(cbind(sub$Longitud, sub$Latitud)))
+diag(matriz_pesos) <- 0
+
+# 4. Ejecutar el Test de Moran (autocorrelación espacial)
+Moran.I(residuos_sub, matriz_pesos)
+
+# Test de Vuong: Compara Binomial Negativa clásica vs. Hurdle Binomial Negativa
+
+vuong(mod_nb, mod_hurdle_ok)
+
+# Comprobación de inflación de ceros para tu modelo Binomial Negativa
+check_zeroinflation(mod_nb)
+
+############################################################
+# 5. GLM BINOMIAL NEGATIVACON CON DATOS CUADRÁTICOS
+############################################################
+
+# 1. Ajustar el modelo completo con las formas no lineales detectadas en el AED
+# EXPLICACIÓN DE LAS VARIABLES SEGÚN EL AED:
+# - TmesFrio: Se incluye el término cuadrático I(TmesFrio^2) debido a la "joroba" u óptimo
+#   térmico del AED (la riqueza sube con el calor, pero cae en fríos extremos).
+# - DistCosta: Se incluye I(DistCosta^2) debido a la caída asintótica en picado observada,
+#   donde la riqueza se desploma al alejarse del litoral y luego se estabiliza.
+# - NOTA DE SELECCIÓN: Estamos metiendo estas variables de forma lineal y cuadrática a la vez. 
+#   Si el término cuadrático no resulta significativo en el summary, deberá ser eliminado 
+#   en el paso posterior de selección de variables (así como cualquier variable irrelevante).
+
+mod_nb2 <- glm.nb(
+  Riqueza ~ TmesFrio + I(TmesFrio^2) + PmesSeco + pH + HIImed + DistCosta + I(DistCosta^2) + LongRios, 
+  data = data
+)
+
+# Inspección inicial de coeficientes para planificar la selección de variables
+summary(mod_nb2)
+
+# 1. ¿POR QUÉ NO SE PUEDE ELIMINAR LA VARIABLE LINEAL SI DEJAMOS LA CUADRÁTICA?
+# - En estadística paramétrica, si un término de orden superior (I(variable^2)) es 
+#   significativo, su término de orden inferior (variable lineal) DEBE permanecer 
+#   en el modelo de manera obligatoria por el Principio de Jerarquía.
+# - Si borrásemos la variable lineal, estaríamos forzando al modelo a asumir que el 
+#   punto de inflexión de la curva (el pico de la joroba o el fondo de la U) ocurre 
+#   exactamente en el valor 0 de nuestra variable estandarizada. Eso destruye el 
+#   ajuste estadístico, sesga los residuos y altera artificialmente los p-valores.
+
+# 2. Diagnóstico de Autocorrelación Espacial (Test de Moran)
+# Seleccionamos una submuestra aleatoria para evitar que la matriz de 20k filas colapse la RAM
+set.seed(123)
+sub <- data[sample(1:nrow(data), 2000), ]
+
+# Extraemos los residuos de este nuevo modelo con curvas para ver si el espacio queda limpio
+residuos_sub <- residuals(mod_nb2, type = "pearson")[as.numeric(rownames(sub))]
+matriz_pesos <- 1 / as.matrix(dist(cbind(sub$Longitud, sub$Latitud)))
+diag(matriz_pesos) <- 0
+
+# Ejecutar el Test de Moran formal
+# Si p.value > 0.05, confirmamos que tras incluir las curvas, los residuos son independientes.
+cat("\n--- TEST DE MORAN (AUTOCORRELACIÓN ESPACIAL PARA MOD_NB2) ---\n")
+Moran.I(residuos_sub, matriz_pesos)
+
+
+# 3. Diagnóstico de Exceso de Ceros (Inflación de Ceros)
+# Comprobamos si mod_nb2 sigue manteniendo la capacidad de replicar tu 70% de ceros
+# ahora que le hemos incorporado la complejidad de las formas cuadráticas.
+cat("\n--- COMPROBACIÓN DE INFLACIÓN DE CEROS PARA MOD_NB2 ---\n")
+check_zeroinflation(mod_nb2)
+
+# Ejecutar la selección automática hacia atrás (Backward) basada en AIC
+cat("--- Ejecutando la selección de variables... ---\n")
+mod_nb2_optimo <- stepAIC(mod_nb2, direction = "backward")
+
+# Mostrar el resultado del modelo final simplificado
+cat("\n--- MODELO ÓPTIMO SELECCIONADO ---\n")
+summary(mod_nb2_optimo)
+
+
+# Ejecutar la comprobación con el tipo de residuo correcto para la Binomial Negativa
+performance::check_model(mod_nb2_optimo, 
+                         check = c("homogeneity", "overdispersion", "outliers"),
+                         residual_type = "normal")
+
+# Test de sobredispersión
+
+gof(mod_nb2_optimo)
+
+################################################################################
+# 6. QUASIPOISSON
+################################################################################
+
+# 1. Ajustar el modelo Quasi-Poisson completo
+mod_qp <- glm(
+  Riqueza ~ TmesFrio + I(TmesFrio^2) + PmesSeco + pH + HIImed + DistCosta + I(DistCosta^2) + LongRios, 
+  family = quasipoisson(link = "log"),
+  data = data
+)
+
+# 2. Evaluar de forma manual qué variables se pueden eliminar (Enfoque Backward Manual)
+cat("\n--- EVALUACIÓN DE ELIMINACIÓN DE VARIABLES (TEST F) ---\n")
+# drop1 evalúa el impacto de quitar cada variable una a una usando la prueba F
+tabla_seleccion <- drop1(mod_qp, test = "F")
+print(tabla_seleccion)
+
+# NOTA: Revisa los p-valores de la tabla. Si todos son menores a 0.05 debido a tus 20k datos, 
+# tu modelo óptimo final seguirá siendo 'mod_qp'. Si alguno es mayor, retíralo manualmente.
+mod_qp_optimo <- mod_qp 
+
+# 3. Diagnóstico de Autocorrelación Espacial (Test de Moran)
+cat("\n--- TEST DE MORAN (AUTOCORRELACIÓN ESPACIAL PARA QUASI-POISSON) ---\n")
+set.seed(123)
+sub <- data[sample(1:nrow(data), 2000), ]
+
+# Extraer residuos de Pearson específicos de este modelo Quasi-Poisson
+residuos_sub_qp <- residuals(mod_qp_optimo, type = "pearson")[as.numeric(rownames(sub))]
+
+# Calcular matriz de pesos espaciales inversos
+matriz_pesos <- 1 / as.matrix(dist(cbind(sub$Longitud, sub$Latitud)))
+diag(matriz_pesos) <- 0
+
+# Ejecutar el Test de Moran (requiere librería 'ape' cargada)
+print(Moran.I(residuos_sub_qp, matriz_pesos))
+
+# 4. Evaluación gráfica de los nuevos residuos con 'performance'
+cat("\n--- GENERANDO GRÁFICOS DE DIAGNÓSTICO ---\n")
+performance::check_model(mod_qp_optimo, 
+                         check = c("homogeneity", "overdispersion", "outliers"),
+                         residual_type = "normal")
+
+# 5. Sobredispersión
+gof(mod_nb2_optimo)
+
+############################################################
+# 7. HUDLE
+############################################################
+
+# 2. Ajustar el modelo Hurdle exacto con glmmTMB
+mod_hurdle_tmb <- glmmTMB(
+  Riqueza ~ TmesFrio + I(TmesFrio^2) + PmesSeco + pH + HIImed + DistCosta + I(DistCosta^2) + LongRios,
+  ziformula = ~ TmesFrio + I(TmesFrio^2) + PmesSeco + pH + HIImed + DistCosta + I(DistCosta^2) + LongRios,
+  data = data,
+  family = truncated_nbinom2(link = "log")  # Binomial Negativa truncada en cero
+)
+
+# 3. Mostrar el resumen para verificar coeficientes
+cat("\n--- RESUMEN DEL MODELO HURDLE CON GLMMTMB ---\n")
+summary(mod_hurdle_tmb)
+
+# 4. Generar los residuos simulados con DHARMa
+cat("\n--- GENERANDO RESIDUOS SIMULADOS ---\n")
+residuos_dharma <- simulateResiduals(fittedModel = mod_hurdle_tmb, n = 250)
+
+# 5. Evaluación gráfica de supuestos (QQ-plot y Residuos vs Predichos)
+cat("\n--- GENERANDO GRÁFICOS DE DIAGNÓSTICO CON DHARMA ---\n")
+plot(residuos_dharma)
+
+# 6. Test formal de dispersión
+cat("\n--- TEST DE DISPERSIÓN BASADO EN SIMULACIONES ---\n")
+testDispersion(residuos_dharma)
+
+# 7. DIAGNÓSTICO DE AUTOCORRELACIÓN ESPACIAL (TEST DE MORAN REVISADO Y SEGURO)
+cat("\n--- TEST DE MORAN (AUTOCORRELACIÓN ESPACIAL PARA EL MODELO HURDLE) ---\n")
+
+# Extraemos los residuos simulados del modelo completo original 
+# (Aquí las dimensiones coinciden al 100% con los datos del modelo ajustado)
+residuos_completos <- simulateResiduals(fittedModel = mod_hurdle_tmb, n = 250)
+
+# Seleccionamos la submuestra de 2,000 datos usando la función nativa de DHARMa.
+# Al pasar la fórmula espacial, DHARMa alinea las coordenadas y limpia los NAs de forma automática.
+set.seed(123)
+sub_indices <- sample(1:length(residuos_completos$scaledResiduals), 2000)
+
+residuos_sub_dharma <- recalculateResiduals(residuos_completos, sel = sub_indices)
+
+# Ejecutar el Test de Moran formal indicando las variables espaciales exactas
+testSpatialAutocorrelation(
+  simulationOutput = residuos_sub_dharma, 
+  x = data$Longitud[sub_indices], 
+  y = data$Latitud[sub_indices]
+)
+
+#vif
+check_collinearity(mod_hurdle_tmb)
+
+#Selección de variables:
+
+mod1 <- glmmTMB(
+  Riqueza ~ PmesSeco + pH + HIImed + DistCosta + I(DistCosta^2) + LongRios,
+  ziformula = ~ PmesSeco + pH + HIImed + DistCosta + I(DistCosta^2) + LongRios,
+  data = data,
+  family = truncated_nbinom2(link = "log")  # Binomial Negativa truncada en cero
+)
+
+
+mod2 <- glmmTMB(
+  Riqueza ~ TmesFrio + I(TmesFrio^2) + pH + HIImed + DistCosta + I(DistCosta^2) + LongRios,
+  ziformula = ~ TmesFrio + I(TmesFrio^2) + pH + HIImed + DistCosta + I(DistCosta^2) + LongRios,
+  data = data,
+  family = truncated_nbinom2(link = "log")  # Binomial Negativa truncada en cero
+)
+
+
+mod3 <- glmmTMB(
+  Riqueza ~ TmesFrio + I(TmesFrio^2) + PmesSeco + HIImed + DistCosta + I(DistCosta^2) + LongRios,
+  ziformula = ~ TmesFrio + I(TmesFrio^2) + PmesSeco + HIImed + DistCosta + I(DistCosta^2) + LongRios,
+  data = data,
+  family = truncated_nbinom2(link = "log")  # Binomial Negativa truncada en cero
+)
+
+
+mod4 <- glmmTMB(
+  Riqueza ~ TmesFrio + I(TmesFrio^2) + PmesSeco + pH + DistCosta + I(DistCosta^2) + LongRios,
+  ziformula = ~ TmesFrio + I(TmesFrio^2) + PmesSeco + pH + DistCosta + I(DistCosta^2) + LongRios,
+  data = data,
+  family = truncated_nbinom2(link = "log")  # Binomial Negativa truncada en cero
+)
+
+
+mod5 <- glmmTMB(
+  Riqueza ~ TmesFrio + I(TmesFrio^2) + PmesSeco + pH + HIImed + LongRios,
+  ziformula = ~ TmesFrio + I(TmesFrio^2) + PmesSeco + pH + HIImed + LongRios,
+  data = data,
+  family = truncated_nbinom2(link = "log")  # Binomial Negativa truncada en cero
+)
+
+
+mod6 <- glmmTMB(
+  Riqueza ~ TmesFrio + I(TmesFrio^2) + PmesSeco + pH + HIImed + DistCosta + I(DistCosta^2),
+  ziformula = ~ TmesFrio + I(TmesFrio^2) + PmesSeco + pH + HIImed + DistCosta + I(DistCosta^2),
+  data = data,
+  family = truncated_nbinom2(link = "log")  # Binomial Negativa truncada en cero
+)
+
+AIC(mod_hurdle_tmb, mod1, mod2, mod3, mod4, mod5, mod6) # No quitamos ninguna variable
+
+############################################################
+# 8. POST-ESTIMACIÓN: R2, IMPORTANCIA Y GRÁFICAS NO LINEALES
+############################################################
+
+# ==============================================================================
+# 1. CÁLCULO DEL R-CUADRADO
+# ==============================================================================
+
+r2(mod_hurdle_tmb)
+
+# ==========================================
+# 2. IMPORTANCIA DE LAS VARIABLES
+# ==========================================
+cat("\n--- Importancia y Coeficientes del Modelo ---\n")
+# Muestra los coeficientes y p-valores de ambos componentes (Count y Zero-Inflation)
+summary(mod_hurdle_tmb)
+
+# Alternativa visual para comparar la importancia/tamaño del efecto:
+# Crea un gráfico de coeficientes estandarizados para ambas partes del modelo
+sjPlot::plot_model(mod_hurdle_tmb, type = "est", transform = NULL, grid = TRUE)
+
+# ==========================================
+# 3. GENERACIÓN DE GRÁFICAS DE EFECTOS
+# ==========================================
+
+# IMPORTANTE: Importar de nuevo los datos (sin estandarizar)
+data_original <- read_excel("C:/Users/DAVID COLLADO/Desktop/Doctorado/RiquezaCleanReduc.xlsx")
+df_real <- data_original 
+
+# Lista de variables continuas del modelo
+variables <- c("TmesFrio", "PmesSeco", "pH", "HIImed", "DistCosta", "LongRios")
+
+graficos_conteo <- list()
+graficos_presencia <- list()
+
+for (var in variables) {
+  
+  # Mantenemos '[all]' para que ggeffects genere los puntos necesarios para curvas suaves
+  termino_grafico <- paste0(var, " [all]")
+  
+  # -------------------------------------------------------------
+  # COMPONENTE 1: Cantidad de Riqueza (Parte Conteo Truncado)
+  # -------------------------------------------------------------
+  pred_count <- ggpredict(mod_hurdle_tmb, terms = termino_grafico, type = "count")
+  
+  graficos_conteo[[var]] <- plot(pred_count) +
+    labs(
+      title = paste("Efecto en Riqueza:", var), 
+      x = var, 
+      y = "Riqueza esperada (>0)"
+    ) +
+    theme_minimal()
+  
+  # -------------------------------------------------------------
+  # COMPONENTE 2: Probabilidad de Presencia (Parte Zero-Inflation)
+  # -------------------------------------------------------------
+  pred_zi <- ggpredict(mod_hurdle_tmb, terms = termino_grafico, type = "zi_prob")
+  
+  # Inversión matemática para ecología (Presencia: 1 - Ausencia)
+  pred_zi$predicted <- 1 - pred_zi$predicted
+  
+  # Inversión correcta de los límites del intervalo de confianza
+  temp_low <- pred_zi$conf.low
+  pred_zi$conf.low <- 1 - pred_zi$conf.high
+  pred_zi$conf.high <- 1 - temp_low
+  
+  graficos_presencia[[var]] <- plot(pred_zi) +
+    labs(
+      title = paste("Prob. Superar Barrera:", var), 
+      x = var, 
+      y = "Probabilidad (Riqueza > 0)"
+    ) +
+    theme_minimal()
+}
+
+# ==========================================
+# 4. VISUALIZACIÓN DE LOS PANELES FINALES
+# ==========================================
+panel_conteo <- patchwork::wrap_plots(graficos_conteo, ncol = 3) + 
+  plot_annotation(title = "Componente de Conteo: Factores que regulan la cantidad de Riqueza")
+
+panel_presencia <- patchwork::wrap_plots(graficos_presencia, ncol = 3) + 
+  plot_annotation(title = "Componente Zero-Inflation: Factores que permiten superar la barrera del cero")
+
+# Ejecuta estas líneas para pintar los paneles en RStudio
+print(panel_conteo)
+print(panel_presencia)
