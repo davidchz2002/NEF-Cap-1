@@ -449,5 +449,3 @@ fig_count <- ggplot(count_df, aes(x, y)) +
 
 print(fig_hurdle) #Establecimiento
 print(fig_count) #Riqueza
-
-print(panel_presencia)
