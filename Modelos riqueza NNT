@@ -260,7 +260,7 @@ performance::check_model(mod_qp_optimo,
 gof(mod_nb2_optimo)
 
 ############################################################
-# 7. HUDLE
+# 7. HURDLE
 ############################################################
 
 # 2. Ajustar el modelo Hurdle exacto con glmmTMB
