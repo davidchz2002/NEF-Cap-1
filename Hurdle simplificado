@@ -1,0 +1,157 @@
+library(car)
+library(corrplot)
+library(DHARMa)
+library(glmmTMB)
+library(performance)
+library(readxl)
+library(tidyverse)
+
+############################################################
+# 1. IMPORTAR, CORREGIR Y ESTANDARIZAR DATOS
+############################################################
+
+data <- read_excel("C:/Users/DAVID COLLADO/Desktop/Doctorado/RiquezaCleanReduc.xlsx")
+
+#Eliminamos las cuadrículas con <50% de tierra
+data <- data %>%
+  filter(Tierra >= 50)
+
+#Corregimos el valor de Riqueza en las cuadrículas con Tierra < 100% restantes
+# empleado la ecuación de Arrhenius (S=c*A^z) con z=0,20
+#floor redondea hacia abajo para no inflar demasiado el valor con Rs altas
+data <- data %>%
+  mutate(
+    Riqueza = if_else(
+      Tierra < 100 & Riqueza > 0,
+      floor(Riqueza / ((Tierra / 100) ^ 0.20)),
+      Riqueza
+    )
+  )
+
+#Estandarizar variables
+vars <- c("TmesFrio","PmesSeco","DistCosta","LongRios","pH","HIImed")
+data[vars] <- scale(data[vars])
+
+############################################################
+# 2. MODELO HURDLE
+############################################################
+
+# 1. Ajustar el modelo
+mod_hurdle_tmb <- glmmTMB(
+  Riqueza ~ TmesFrio + I(TmesFrio^2) + PmesSeco + pH + HIImed + DistCosta + I(DistCosta^2) + LongRios,
+  ziformula = ~ TmesFrio + I(TmesFrio^2) + PmesSeco + pH + HIImed + DistCosta + I(DistCosta^2) + LongRios,
+  data = data,
+  family = truncated_nbinom2(link = "log")  # Binomial Negativa truncada en cero
+)
+
+# 2. Resumen con p-valores (el N tan elevado genera falsos significativos)
+summary(mod_hurdle_tmb)
+
+# 3. IIR y OR: Alternativa a p-valores con N elevado en Hurdle
+# OR (Parte 1, Logística): Mide la probabilidad de superar el cero vs quedarse en cero.
+# IRR (Parte 2, Conteo): Mide el cambio porcentual en la cantidad de eventos (solo si Y > 0).
+
+#Obtener la matriz de intervalos de confianza limpios (incluye el Estimate numérico nativo)
+matriz_ci <- confint(mod_hurdle_tmb, estimate = TRUE)
+#Seleccionar solo las columnas numéricas que nos interesan (Estimate, 2.5%, 97.5%)
+matriz_num <- matriz_ci[rownames(matriz_ci) != "sigma", c("Estimate", "2.5 %", "97.5 %")]
+#Exponenciar de forma segura para obtener IRR y Odds Ratio
+tabla_efectos <- exp(matriz_num)
+#Ver los valores
+print(round(tabla_efectos, 4))
+
+#4. r2 y r2 ajustado
+r2(mod_hurdle_tmb)
+
+############################################################
+# 3. COMPROBACIÓN DE ASUNCIONES
+############################################################
+
+##El modelo cumple todas las asunciones:
+
+# 1. Dharma (uniformidad, dispersión, outliers y homocedasticidad)
+residuos_dharma <- simulateResiduals(fittedModel = mod_hurdle_tmb, n = 500)
+plot(residuos_dharma) 
+#Solo el test de outliers sale significativo, poro se debe al tamaño de N
+#El modelo tiene valores extremos, no outliers, por lo que no es necesario eliminar datos
+
+# 2. Test de Moran (autocorrelación espacial)
+residuos_completos <- simulateResiduals(fittedModel = mod_hurdle_tmb, n = 250)
+set.seed(123)
+sub_indices <- sample(1:length(residuos_completos$scaledResiduals), 2000)
+residuos_sub_dharma <- recalculateResiduals(residuos_completos, sel = sub_indices)
+testSpatialAutocorrelation(
+  simulationOutput = residuos_sub_dharma, 
+  x = data$Longitud[sub_indices], 
+  y = data$Latitud[sub_indices]
+)
+
+# 3. VIF (multicolinealidad / correlación entre variables)
+check_collinearity(mod_hurdle_tmb)
+#En variables con términos cuadráticos hay que mirar el vif ajustado
+
+# 4. Test de Inflación/Deflación de Ceros
+# Verifica si la estructura Hurdle elegida captura la proporción de ceros
+testZeroInflation(residuos_dharma)
+
+# 5. Esfuerzo de muestreo
+data_muestreada <- subset(data, EsfMuest > 0)
+#Ajustar el GAM: la riqueza depende del esfuerzo de forma totalmente libre (s)
+modelo_gam <- gam(Riqueza ~ s(EsfMuest, bs = "cr"), data = data_muestreada)
+#Crear una secuencia suave para el eje X
+x_eje <- seq(min(data_muestreada$EsfMuest), max(data_muestreada$EsfMuest), length.out = 1000)
+y_eje <- predict(modelo_gam, newdata = data.frame(EsfMuest = x_eje))
+#Dibujar la función real y libre
+plot(x_eje, y_eje, type = "l", col = "darkgreen", lwd = 3,
+     xlab = "Esfuerzo de Muestreo", 
+     ylab = "Riqueza de Árboles Exóticos",
+     ylim = c(0, max(data_muestreada$Riqueza)))
+
+############################################################
+# 4. GRÁFICAS DE EFECTOS
+############################################################
+
+data_orig <- read_excel("C:/Users/DAVID COLLADO/Desktop/Doctorado/RiquezaCleanReduc.xlsx")
+vars <- c("TmesFrio", "PmesSeco", "pH", "HIImed", "DistCosta", "LongRios")
+
+pred_var <- function(var) {
+  x <- seq(min(data[[var]]), max(data[[var]]), length.out = 200)
+  nd <- data[rep(1, 200), ]
+  nd[vars] <- lapply(data[vars], mean, na.rm = TRUE)
+  nd[[var]] <- x
+  x_real <- x * sd(data_orig[[var]], na.rm = TRUE) + mean(data_orig[[var]], na.rm = TRUE)
+  
+  list(
+    hurdle = data.frame(Variable = var, x = x_real, y = 1 - predict(mod_hurdle_tmb, nd, type = "zprob")),
+    count = data.frame(Variable = var, x = x_real, y = predict(mod_hurdle_tmb, nd, type = "conditional"))
+  )
+}
+
+res <- lapply(vars, pred_var)
+hurdle_df <- bind_rows(lapply(res, `[[`, "hurdle"))
+count_df  <- bind_rows(lapply(res, `[[`, "count"))
+
+
+# ----------------------------------------------------------
+# Figura 1: Superación de barrera (Riqueza > 0)
+# ----------------------------------------------------------
+
+fig_hurdle <- ggplot(hurdle_df, aes(x, y)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~Variable, scales = "free_x") +
+  labs(y = "P(Riqueza > 0)", x = NULL) +
+  theme_bw()
+
+print(fig_hurdle) #Establecimiento
+
+# ----------------------------------------------------------
+# Figura 2: Conteo condicionado a presencia
+# ----------------------------------------------------------
+
+fig_count <- ggplot(count_df, aes(x, y)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~Variable, scales = "free_x") +
+  labs(y = "Riqueza esperada", x = NULL) +
+  theme_bw()
+
+print(fig_count) #Riqueza
