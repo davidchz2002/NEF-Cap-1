@@ -28,6 +28,19 @@ data <- data %>%
     )
   )
 
+# Comprobar efecto del esfuerzo de muestreo
+data_muestreada <- subset(data, EsfMuest > 0)
+#Ajustar el GAM: la riqueza depende del esfuerzo de forma totalmente libre (s)
+modelo_gam <- gam(Riqueza ~ s(EsfMuest, bs = "cr"), data = data_muestreada)
+#Crear una secuencia suave para el eje X
+x_eje <- seq(min(data_muestreada$EsfMuest), max(data_muestreada$EsfMuest), length.out = 1000)
+y_eje <- predict(modelo_gam, newdata = data.frame(EsfMuest = x_eje))
+#Dibujar la función real y libre
+plot(x_eje, y_eje, type = "l", col = "darkgreen", lwd = 3,
+     xlab = "Esfuerzo de Muestreo", 
+     ylab = "Riqueza de Árboles Exóticos",
+     ylim = c(0, max(data_muestreada$Riqueza)))
+
 #Estandarizar variables
 vars <- c("TmesFrio","PmesSeco","DistCosta","LongRios","pH","HIImed")
 data[vars] <- scale(data[vars])
@@ -93,19 +106,6 @@ check_collinearity(mod_hurdle_tmb)
 # 4. Test de Inflación/Deflación de Ceros
 # Verifica si la estructura Hurdle elegida captura la proporción de ceros
 testZeroInflation(residuos_dharma)
-
-# 5. Esfuerzo de muestreo
-data_muestreada <- subset(data, EsfMuest > 0)
-#Ajustar el GAM: la riqueza depende del esfuerzo de forma totalmente libre (s)
-modelo_gam <- gam(Riqueza ~ s(EsfMuest, bs = "cr"), data = data_muestreada)
-#Crear una secuencia suave para el eje X
-x_eje <- seq(min(data_muestreada$EsfMuest), max(data_muestreada$EsfMuest), length.out = 1000)
-y_eje <- predict(modelo_gam, newdata = data.frame(EsfMuest = x_eje))
-#Dibujar la función real y libre
-plot(x_eje, y_eje, type = "l", col = "darkgreen", lwd = 3,
-     xlab = "Esfuerzo de Muestreo", 
-     ylab = "Riqueza de Árboles Exóticos",
-     ylim = c(0, max(data_muestreada$Riqueza)))
 
 ############################################################
 # 4. GRÁFICAS DE EFECTOS
